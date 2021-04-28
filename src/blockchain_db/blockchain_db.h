@@ -170,8 +170,11 @@ struct txpool_tx_meta_t
   uint8_t is_local: 1;
   uint8_t dandelionpp_stem : 1;
   uint8_t bf_padding: 4;
+  uint8_t padding1[4];
+  uint64_t offshore_fee;
+  char fee_asset_type[8];
 
-  uint8_t padding[76]; // till 192 bytes
+  uint8_t padding[56]; // till 192 bytes
 
   void set_relay_method(relay_method method) noexcept;
   relay_method get_relay_method() const noexcept;
@@ -1151,6 +1154,13 @@ public:
    */
   virtual uint64_t height() const = 0;
 
+  /**
+   * @brief fetch the circulating supply tally values from the blockchain
+   *
+   * @return the current circulating supply tally values
+   */
+  virtual std::vector<std::pair<std::string, int64_t>> get_circulating_supply() const = 0;
+  
 
   /**
    * <!--

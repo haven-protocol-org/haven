@@ -54,6 +54,7 @@ using namespace epee;
 #include "rpc/rpc_args.h"
 #include "rpc/core_rpc_server_commands_defs.h"
 #include "daemonizer/daemonizer.h"
+#include "offshore/asset_types.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "wallet.rpc"
@@ -90,7 +91,8 @@ namespace
     if (block_reward == 0)
       entry.suggested_confirmations_threshold = 0;
     else
-      entry.suggested_confirmations_threshold = (entry.amount + block_reward - 1) / block_reward;
+      entry.suggested_confirmations_threshold = 10;
+      // entry.suggested_confirmations_threshold = (entry.amounts_map[0].second + block_reward - 1) / block_reward;
   }
 }
 
@@ -289,7 +291,7 @@ namespace tools
     {
       MINFO("The daemon is not set up to background mine.");
       MINFO("With background mining enabled, the daemon will mine when idle and not on battery.");
-      MINFO("Enabling this supports the network you are using, and makes you eligible for receiving new monero");
+      MINFO("Enabling this supports the network you are using, and makes you eligible for receiving new haven");
       MINFO("Set setup-background-mining to 1 in monero-wallet-cli to change.");
       return;
     }
@@ -325,13 +327,13 @@ namespace tools
       entry.payment_id = entry.payment_id.substr(0,16);
     entry.height = pd.m_block_height;
     entry.timestamp = pd.m_timestamp;
+    entry.asset_type = pd.m_asset_type;
     entry.amount = pd.m_amount;
-    entry.amounts = pd.m_amounts;
     entry.unlock_time = pd.m_unlock_time;
     entry.locked = !m_wallet->is_transfer_unlocked(pd.m_unlock_time, pd.m_block_height);
     entry.fee = pd.m_fee;
     entry.note = m_wallet->get_tx_note(pd.m_tx_hash);
-    entry.type = pd.m_coinbase ? "block" : "in";
+    entry.type = pd.m_coinbase ? "block" : (entry.asset_type == "XHV") ? "in" : entry.asset_type + " in";
     entry.subaddr_index = pd.m_subaddr_index;
     entry.subaddr_indices.push_back(pd.m_subaddr_index);
     entry.address = m_wallet->get_subaddress_as_str(pd.m_subaddr_index);
@@ -348,19 +350,20 @@ namespace tools
     entry.timestamp = pd.m_timestamp;
     entry.unlock_time = pd.m_unlock_time;
     entry.locked = !m_wallet->is_transfer_unlocked(pd.m_unlock_time, pd.m_block_height);
-    entry.fee = pd.m_amount_in - pd.m_amount_out;
+    entry.fee = pd.m_fee;
     uint64_t change = pd.m_change == (uint64_t)-1 ? 0 : pd.m_change; // change may not be known
-    entry.amount = pd.m_amount_in - change - entry.fee;
+    entry.amount = pd.m_amount_out;
+    entry.asset_type = pd.m_source_currency_type;
     entry.note = m_wallet->get_tx_note(txid);
 
     for (const auto &d: pd.m_dests) {
       entry.destinations.push_back(wallet_rpc::transfer_destination());
       wallet_rpc::transfer_destination &td = entry.destinations.back();
-      td.amount = d.amount;
+      td.amount = entry.asset_type == "XHV" ? d.amount :  entry.asset_type == "XUSD" ? d.amount_usd : d.amount_xasset;
       td.address = d.address(m_wallet->nettype(), pd.m_payment_id);
     }
 
-    entry.type = "out";
+    entry.type = (entry.asset_type == "XHV") ? "out" : entry.asset_type + " out";
     entry.subaddr_index = { pd.m_subaddr_account, 0 };
     for (uint32_t i: pd.m_subaddr_indices)
       entry.subaddr_indices.push_back({pd.m_subaddr_account, i});
@@ -378,8 +381,9 @@ namespace tools
       entry.payment_id = entry.payment_id.substr(0,16);
     entry.height = 0;
     entry.timestamp = pd.m_timestamp;
-    entry.fee = pd.m_amount_in - pd.m_amount_out;
-    entry.amount = pd.m_amount_in - pd.m_change - entry.fee;
+    entry.fee = pd.m_fee;
+    entry.amount = pd.m_amount_out;
+    entry.asset_type = pd.m_source_currency_type;
     entry.unlock_time = pd.m_tx.unlock_time;
     entry.locked = true;
     entry.note = m_wallet->get_tx_note(txid);
@@ -387,11 +391,11 @@ namespace tools
     for (const auto &d: pd.m_dests) {
       entry.destinations.push_back(wallet_rpc::transfer_destination());
       wallet_rpc::transfer_destination &td = entry.destinations.back();
-      td.amount = d.amount;
+      td.amount =   entry.asset_type == "XHV" ? d.amount :  entry.asset_type == "XUSD" ? d.amount_usd : d.amount_xasset;
       td.address = d.address(m_wallet->nettype(), pd.m_payment_id);
     }
 
-    entry.type = is_failed ? "failed" : "pending";
+    entry.type = is_failed ? "failed" : (entry.asset_type == "XHV") ? "pending" : entry.asset_type + " pending";
     entry.subaddr_index = { pd.m_subaddr_account, 0 };
     for (uint32_t i: pd.m_subaddr_indices)
       entry.subaddr_indices.push_back({pd.m_subaddr_account, i});
@@ -408,14 +412,14 @@ namespace tools
       entry.payment_id = entry.payment_id.substr(0,16);
     entry.height = 0;
     entry.timestamp = pd.m_timestamp;
+    entry.asset_type = pd.m_asset_type;
     entry.amount = pd.m_amount;
-    entry.amounts = pd.m_amounts;
     entry.unlock_time = pd.m_unlock_time;
     entry.locked = true;
     entry.fee = pd.m_fee;
     entry.note = m_wallet->get_tx_note(pd.m_tx_hash);
     entry.double_spend_seen = ppd.m_double_spend_seen;
-    entry.type = "pool";
+    entry.type = (entry.asset_type == "XHV") ? "pool" : entry.asset_type + " pool";
     entry.subaddr_index = pd.m_subaddr_index;
     entry.subaddr_indices.push_back(pd.m_subaddr_index);
     entry.address = m_wallet->get_subaddress_as_str(pd.m_subaddr_index);
@@ -425,10 +429,36 @@ namespace tools
   bool wallet_rpc_server::on_getbalance(const wallet_rpc::COMMAND_RPC_GET_BALANCE::request& req, wallet_rpc::COMMAND_RPC_GET_BALANCE::response& res, epee::json_rpc::error& er, const connection_context *ctx)
   {
     if (!m_wallet) return not_open(er);
+
+    // check whether we have valid asset_type passed in
+    if (req.asset_type.size() == 0 || (std::find(offshore::ASSET_TYPES.begin(), offshore::ASSET_TYPES.end(), req.asset_type) == offshore::ASSET_TYPES.end())) {
+      er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ASSET_TYPE;
+      std::string assets_str;
+      bool comma = false;
+      for (const auto& asset: offshore::ASSET_TYPES) {
+        if (comma) {
+          assets_str += ", ";
+        } else {
+          comma = true;
+        }
+        assets_str += asset;
+      }
+      er.message = "Paremeter 'asset_type' is not supported. Currently supported asset types are: " + assets_str;
+      return false;
+    }
+
     try
     {
-      res.balance = req.all_accounts ? m_wallet->balance_all(req.strict) : m_wallet->balance(req.account_index, req.strict);
-      res.unlocked_balance = req.all_accounts ? m_wallet->unlocked_balance_all(req.strict, &res.blocks_to_unlock, &res.time_to_unlock) : m_wallet->unlocked_balance(req.account_index, req.strict, &res.blocks_to_unlock, &res.time_to_unlock);
+      std::map<std::string, uint64_t> local_blocks_to_unlock, local_time_to_unlock;
+      res.balance = req.all_accounts ? m_wallet->balance_all(req.strict)[req.asset_type] : m_wallet->balance(req.asset_type, req.account_index, req.strict);
+      res.unlocked_balance = req.all_accounts ? m_wallet->unlocked_balance_all(req.strict, &local_blocks_to_unlock, &local_time_to_unlock)[req.asset_type] : m_wallet->unlocked_balance(req.asset_type, req.account_index, req.strict, &res.blocks_to_unlock, &res.time_to_unlock);
+
+      if (req.all_accounts) {
+        // Copy the values for the correct currency from the map to the response
+        res.blocks_to_unlock = local_blocks_to_unlock[req.asset_type];
+        res.time_to_unlock = local_time_to_unlock[req.asset_type];
+      }
+      
       res.multisig_import_needed = m_wallet->multisig() && m_wallet->has_multisig_partial_key_images();
       std::map<uint32_t, std::map<uint32_t, uint64_t>> balance_per_subaddress_per_account;
       std::map<uint32_t, std::map<uint32_t, std::pair<uint64_t, std::pair<uint64_t, uint64_t>>>> unlocked_balance_per_subaddress_per_account;
@@ -436,14 +466,14 @@ namespace tools
       {
         for (uint32_t account_index = 0; account_index < m_wallet->get_num_subaddress_accounts(); ++account_index)
         {
-          balance_per_subaddress_per_account[account_index] = m_wallet->balance_per_subaddress(account_index, req.strict);
-          unlocked_balance_per_subaddress_per_account[account_index] = m_wallet->unlocked_balance_per_subaddress(account_index, req.strict);
+          balance_per_subaddress_per_account[account_index] = m_wallet->balance_per_subaddress(req.asset_type, account_index, req.strict);
+          unlocked_balance_per_subaddress_per_account[account_index] = m_wallet->unlocked_balance_per_subaddress(req.asset_type, account_index, req.strict);
         }
       }
       else
       {
-        balance_per_subaddress_per_account[req.account_index] = m_wallet->balance_per_subaddress(req.account_index, req.strict);
-        unlocked_balance_per_subaddress_per_account[req.account_index] = m_wallet->unlocked_balance_per_subaddress(req.account_index, req.strict);
+        balance_per_subaddress_per_account[req.account_index] = m_wallet->balance_per_subaddress(req.asset_type, req.account_index, req.strict);
+        unlocked_balance_per_subaddress_per_account[req.account_index] = m_wallet->unlocked_balance_per_subaddress(req.asset_type, req.account_index, req.strict);
       }
       std::vector<tools::wallet2::transfer_details> transfers;
       m_wallet->get_transfers(transfers);
@@ -622,8 +652,8 @@ namespace tools
         wallet_rpc::COMMAND_RPC_GET_ACCOUNTS::subaddress_account_info info;
         info.account_index = subaddr_index.major;
         info.base_address = m_wallet->get_subaddress_as_str(subaddr_index);
-        info.balance = m_wallet->balance(subaddr_index.major, req.strict_balances);
-        info.unlocked_balance = m_wallet->unlocked_balance(subaddr_index.major, req.strict_balances);
+        info.balance = m_wallet->balance(req.asset_type, subaddr_index.major, req.strict_balances);
+        info.unlocked_balance = m_wallet->unlocked_balance(req.asset_type, subaddr_index.major, req.strict_balances);
         info.label = m_wallet->get_subaddress_label(subaddr_index);
         info.tag = account_tags.second[subaddr_index.major];
         res.subaddress_accounts.push_back(info);
@@ -857,17 +887,18 @@ namespace tools
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------------
-  static uint64_t total_amount(const tools::wallet2::pending_tx &ptx)
+  static uint64_t total_amount(const tools::wallet2::pending_tx &ptx, std::string asset_type)
   {
     uint64_t amount = 0;
-    for (const auto &dest: ptx.dests) amount += dest.amount;
+    for (const auto &dest: ptx.dests) amount += (asset_type == "XUSD" ? dest.amount_usd : asset_type == "XHV" ? dest.amount : dest.amount_xasset);
     return amount;
   }
   //------------------------------------------------------------------------------------------------------------------------------
   template<typename Ts, typename Tu>
   bool wallet_rpc_server::fill_response(std::vector<tools::wallet2::pending_tx> &ptx_vector,
-      bool get_tx_key, Ts& tx_key, Tu &amount, Tu &fee, Tu &weight, std::string &multisig_txset, std::string &unsigned_txset, bool do_not_relay,
-      Ts &tx_hash, bool get_tx_hex, Ts &tx_blob, bool get_tx_metadata, Ts &tx_metadata, epee::json_rpc::error &er)
+      bool get_tx_key, Ts& tx_key, Tu &amount, std::string amount_asset, Tu &fee, Tu &weight, std::string &multisig_txset, std::string &unsigned_txset,
+				bool do_not_relay, Ts &tx_hash, bool get_tx_hex, Ts &tx_blob, bool get_tx_metadata, Ts &tx_metadata, epee::json_rpc::error &er,
+				bool use_offshore_amounts)
   {
     for (const auto & ptx : ptx_vector)
     {
@@ -879,7 +910,7 @@ namespace tools
         fill(tx_key, std::string(s.data(), s.size()));
       }
       // Compute amount leaving wallet in tx. By convention dests does not include change outputs
-      fill(amount, total_amount(ptx));
+      fill(amount, ptx.tx.amount_burnt > 0 ? ptx.tx.amount_burnt : total_amount(ptx, amount_asset));
       fill(fee, ptx.fee);
       fill(weight, cryptonote::get_transaction_weight(ptx.tx));
     }
@@ -925,6 +956,535 @@ namespace tools
     return true;
   }
   //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_offshore(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_offshore starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+     // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore/onshore transactions prohibited until v" + std::to_string(HF_VERSION_OFFSHORE_FULL);
+      return false;
+    }
+    
+    // Populate the txextra to signify that this is an offshore tx
+    std::string offshore_data;
+    if (m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      offshore_data = "XHV-XUSD";
+    } else {
+      offshore_data = std::string("AN");
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      uint64_t unlock_time = 0;
+      if (0/*m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FEES_V3, 0)*/) {
+	      unlock_time = ((priority == 4) ? 180 : (priority == 3) ? 1440 : (priority == 2) ? 3600 : 7200) +  m_wallet->get_blockchain_current_height();
+      } else if (m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FEES_V2, 0)) {
+	      unlock_time = ((priority == 4) ? 180 : (priority == 3) ? 720 : (priority == 2) ? 1440 : 5040) + m_wallet->get_blockchain_current_height();
+      } else {
+	      unlock_time = 60 * pow(3, std::max((uint32_t)0, 4-priority)) + m_wallet->get_blockchain_current_height();
+      }
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XHV";
+      res.fee_asset = "XHV";
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_offshore_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_offshore_transfer starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+    // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore/onshore transactions prohibited until v" + std::to_string(HF_VERSION_OFFSHORE_FULL);
+      return false;
+    }
+    
+    // Populate the txextra to signify that this is an offshore tx
+    std::string offshore_data;
+    if (m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      offshore_data = "XUSD-XUSD";
+    } else {
+      offshore_data = std::string("NN");
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, req.unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XUSD";
+      res.fee_asset = "XUSD";
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er, true);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_onshore(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_offshore starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+     // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore/onshore transactions prohibited until v" + std::to_string(HF_VERSION_OFFSHORE_FULL);
+      return false;
+    }
+    
+    // Populate the txextra to signify that this is an offshore tx
+    std::string offshore_data;
+    if (m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      offshore_data = "XUSD-XHV";
+    } else {
+      offshore_data = std::string("NA");
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      uint64_t unlock_time = 0;
+      if (0/*m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FEES_V3, 0)*/) {
+	      unlock_time = ((priority == 4) ? 180 : (priority == 3) ? 1440 : (priority == 2) ? 3600 : 7200) +  m_wallet->get_blockchain_current_height();
+      } else if (m_wallet->use_fork_rules(HF_VERSION_OFFSHORE_FEES_V2, 0)) {
+	      unlock_time = ((priority == 4) ? 180 : (priority == 3) ? 720 : (priority == 2) ? 1440 : 5040) + m_wallet->get_blockchain_current_height();
+      } else {
+	      unlock_time = 60 * pow(3, std::max((uint32_t)0, 4-priority)) + m_wallet->get_blockchain_current_height();
+      }
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XUSD";
+      res.fee_asset = "XUSD";
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_xusd_to_xasset(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_xusd_to_xasset starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+    // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "xAsset transactions prohibited until v" + std::to_string(HF_VERSION_XASSET_FULL);
+      return false;
+    }
+
+    // Populate the tx extra to signify that this is an xasset tx
+    std::string offshore_data;
+    if (req.asset_type.size() > 0) {
+      offshore_data = "XUSD-" + req.asset_type;
+    } else {
+      er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+      er.message = "Field 'asset_type' Unspecified. Tx contruction is not possible.";
+      return false;
+    }
+    if (req.asset_type == "XUSD" || req.asset_type == "XHV") {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "This endpoint is for xUSD to xAsset conversions. Check out other endpoints for xUSD and/or XHV conversions.";
+      return false;
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      uint64_t unlock_time = 10;
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XUSD";
+      res.fee_asset = "XUSD";
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_xasset_to_xusd(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_xasset_to_xusd starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+    // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+      er.message = "xAsset transactions prohibited until v" + std::to_string(HF_VERSION_XASSET_FULL);
+      return false;
+    }
+
+    // Populate the tx extra to signify that this is an xasset tx
+    std::string offshore_data;
+    if (req.asset_type.size() > 0) {
+      offshore_data = req.asset_type + "-XUSD";
+    } else {
+      er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+      er.message = "Field 'asset_type' Unspecified. Tx contruction is not possible.";
+      return false;
+    }
+    if (req.asset_type == "XUSD" || req.asset_type == "XHV") {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "This endpoint is for xUSD to xAsset conversions. Check out other endpoints for xUSD and/or XHV conversions.";
+      return false;
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      uint64_t unlock_time = 10;
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = req.asset_type;
+      res.fee_asset = req.asset_type;
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
+  bool wallet_rpc_server::on_xasset_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::request& req, wallet_rpc::COMMAND_RPC_TRANSFER_SPLIT::response& res, epee::json_rpc::error& er, const connection_context *ctx)
+  {
+    std::vector<cryptonote::tx_destination_entry> dsts;
+    std::vector<uint8_t> extra;
+
+    LOG_PRINT_L3("on_offshore starts");
+    if (!m_wallet) return not_open(er);
+    if (m_restricted)
+    {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+    // Check that offshore TXs are permitted
+    if (!m_wallet->use_fork_rules(HF_VERSION_XASSET_FULL, 0)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "xAsset transactions prohibited until v" + std::to_string(HF_VERSION_XASSET_FULL);
+      return false;
+    }
+
+    // Populate the tx extra to signify that this is an xasset tx
+    std::string offshore_data;
+    if (req.asset_type.size() > 0) {
+      offshore_data = req.asset_type + "-" + req.asset_type;
+    } else {
+      er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+      er.message = "Field 'asset_type' Unspecified. Tx contruction is not possible.";
+      return false;
+    }
+    if (req.asset_type == "XUSD" || req.asset_type == "XHV") {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "This endpoint is for xUSD to xAsset transfers. Check out other endpoints for xUSD and/or XHV transfers.";
+      return false;
+    }
+    if (!cryptonote::add_offshore_to_tx_extra(extra, offshore_data)) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Offshore data failed to serialise";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
+    // validate the transfer requested and populate dsts & extra
+    if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
+    {
+      return false;
+    }
+
+    try
+    {
+      uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
+      uint32_t priority = m_wallet->adjust_priority(req.priority);
+      uint64_t unlock_time = 10;
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_2(dsts, mixin, unlock_time, priority, extra, req.account_index, req.subaddr_indices);
+
+      if (ptx_vector.empty())
+      {
+        er.code = WALLET_RPC_ERROR_CODE_TX_NOT_POSSIBLE;
+        er.message = "No transaction created";
+        return false;
+      }
+
+      // much easier to do it here then in fill_response
+      res.amount_asset = req.asset_type;
+      res.fee_asset = req.asset_type;
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+    }
+    catch (const std::exception& e)
+    {
+      handle_rpc_exception(std::current_exception(), er, WALLET_RPC_ERROR_CODE_GENERIC_TRANSFER_ERROR);
+      return false;
+    }
+    return true;
+  }
+  //------------------------------------------------------------------------------------------------------------------------------
   bool wallet_rpc_server::on_transfer(const wallet_rpc::COMMAND_RPC_TRANSFER::request& req, wallet_rpc::COMMAND_RPC_TRANSFER::response& res, epee::json_rpc::error& er, const connection_context *ctx)
   {
 
@@ -937,6 +1497,20 @@ namespace tools
     {
       er.code = WALLET_RPC_ERROR_CODE_DENIED;
       er.message = "Command unavailable in restricted mode.";
+      return false;
+    }
+
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
       return false;
     }
 
@@ -966,8 +1540,11 @@ namespace tools
         er.message = "Transaction would be too large.  try /transfer_split.";
         return false;
       }
-
-      return fill_response(ptx_vector, req.get_tx_key, res.tx_key, res.amount, res.fee, res.weight, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
+      
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XHV";
+      res.fee_asset = "XHV";
+      return fill_response(ptx_vector, req.get_tx_key, res.tx_key, res.amount, res.amount_asset, res.fee, res.weight, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
           res.tx_hash, req.get_tx_hex, res.tx_blob, req.get_tx_metadata, res.tx_metadata, er);
     }
     catch (const std::exception& e)
@@ -992,6 +1569,20 @@ namespace tools
       return false;
     }
 
+    // add the memo data to tx extra if it exist
+    size_t memo_size = req.memo.size();
+    if (memo_size > 0 && memo_size <= TX_EXTRA_MEMO_MAX_COUNT) {
+      if (!cryptonote::add_memo_to_tx_extra(extra, req.memo)) {
+	er.code = WALLET_RPC_ERROR_CODE_DENIED;
+	er.message = "Transaction memo failed to serialise";
+	return false;
+      }
+    } else if (memo_size > TX_EXTRA_MEMO_MAX_COUNT) {
+      er.code = WALLET_RPC_ERROR_CODE_DENIED;
+      er.message = "Transaction memo can't be more than 255 charecters long!";
+      return false;
+    }
+
     // validate the transfer requested and populate dsts & extra; RPC_TRANSFER::request and RPC_TRANSFER_SPLIT::request are identical types.
     if (!validate_transfer(req.destinations, req.payment_id, dsts, extra, true, er))
     {
@@ -1013,8 +1604,11 @@ namespace tools
         return false;
       }
 
-      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
-          res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+      // much easier to do it here then in fill_response
+      res.amount_asset = "XHV";
+      res.fee_asset = "XHV";
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.amount_asset, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
     }
     catch (const std::exception& e)
     {
@@ -1376,8 +1970,8 @@ namespace tools
     {
       std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_unmixable_sweep_transactions();
 
-      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
-          res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, "XHV", res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
     }
     catch (const std::exception& e)
     {
@@ -1432,10 +2026,10 @@ namespace tools
     {
       uint64_t mixin = m_wallet->adjust_mixin(req.ring_size ? req.ring_size - 1 : 0);
       uint32_t priority = m_wallet->adjust_priority(req.priority);
-      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_all(req.below_amount, dsts[0].addr, dsts[0].is_subaddress, req.outputs, mixin, req.unlock_time, priority, extra, req.account_index, subaddr_indices);
+      std::vector<wallet2::pending_tx> ptx_vector = m_wallet->create_transactions_all(req.below_amount, dsts[0].addr, dsts[0].is_subaddress, req.outputs, mixin, req.unlock_time, priority, extra, req.account_index, subaddr_indices, "XHV");
 
-      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
-          res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
+      return fill_response(ptx_vector, req.get_tx_keys, res.tx_key_list, res.amount_list, "XHV", res.fee_list, res.weight_list, res.multisig_txset, res.unsigned_txset,
+			   req.do_not_relay, res.tx_hash_list, req.get_tx_hex, res.tx_blob_list, req.get_tx_metadata, res.tx_metadata_list, er);
     }
     catch (const std::exception& e)
     {
@@ -1509,7 +2103,7 @@ namespace tools
         return false;
       }
 
-      return fill_response(ptx_vector, req.get_tx_key, res.tx_key, res.amount, res.fee, res.weight, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
+      return fill_response(ptx_vector, req.get_tx_key, res.tx_key, res.amount, "XHV", res.fee, res.weight, res.multisig_txset, res.unsigned_txset, req.do_not_relay,
           res.tx_hash, req.get_tx_hex, res.tx_blob, req.get_tx_metadata, res.tx_metadata, er);
     }
     catch (const std::exception& e)
@@ -1698,37 +2292,53 @@ namespace tools
       return false;
     }
 
-      if(sizeof(payment_id) == payment_id_blob.size())
-      {
-        payment_id = *reinterpret_cast<const crypto::hash*>(payment_id_blob.data());
-      }
-      else if(sizeof(payment_id8) == payment_id_blob.size())
-      {
-        payment_id8 = *reinterpret_cast<const crypto::hash8*>(payment_id_blob.data());
-        memcpy(payment_id.data, payment_id8.data, 8);
-        memset(payment_id.data + 8, 0, 24);
-      }
-      else
-      {
-        er.code = WALLET_RPC_ERROR_CODE_WRONG_PAYMENT_ID;
-        er.message = "Payment ID has invalid size: " + req.payment_id;
-        return false;
-      }
+    if(sizeof(payment_id) == payment_id_blob.size())
+    {
+      payment_id = *reinterpret_cast<const crypto::hash*>(payment_id_blob.data());
+    }
+    else if(sizeof(payment_id8) == payment_id_blob.size())
+    {
+      payment_id8 = *reinterpret_cast<const crypto::hash8*>(payment_id_blob.data());
+      memcpy(payment_id.data, payment_id8.data, 8);
+      memset(payment_id.data + 8, 0, 24);
+    }
+    else
+    {
+      er.code = WALLET_RPC_ERROR_CODE_WRONG_PAYMENT_ID;
+      er.message = "Payment ID has invalid size: " + req.payment_id;
+      return false;
+    }
 
     res.payments.clear();
     std::list<wallet2::payment_details> payment_list;
     m_wallet->get_payments(payment_id, payment_list);
     for (auto & payment : payment_list)
     {
+      // Iterate over our vector to see which currencies are requested
+      bool bMatched = false;
+      std::vector<std::string> types = req.types;
+      if (!types.size())
+	types.push_back("xhv");
+
+      for (auto type: types) {
+	if (boost::algorithm::to_lower_copy(type) == boost::algorithm::to_lower_copy(payment.m_asset_type)) {
+	  bMatched = true;
+	} else if (boost::algorithm::to_lower_copy(type) == "all") {
+	  bMatched = true;
+	}
+      }
+      if (!bMatched)
+	continue;
       wallet_rpc::payment_details rpc_payment;
-      rpc_payment.payment_id   = req.payment_id;
-      rpc_payment.tx_hash      = epee::string_tools::pod_to_hex(payment.m_tx_hash);
-      rpc_payment.amount       = payment.m_amount;
-      rpc_payment.block_height = payment.m_block_height;
-      rpc_payment.unlock_time  = payment.m_unlock_time;
-      rpc_payment.locked       = !m_wallet->is_transfer_unlocked(payment.m_unlock_time, payment.m_block_height);
+      rpc_payment.payment_id    = req.payment_id;
+      rpc_payment.tx_hash       = epee::string_tools::pod_to_hex(payment.m_tx_hash);
+      rpc_payment.amount        = payment.m_amount;
+      rpc_payment.type          = payment.m_asset_type;
+      rpc_payment.block_height  = payment.m_block_height;
+      rpc_payment.unlock_time   = payment.m_unlock_time;
+      rpc_payment.locked        = !m_wallet->is_transfer_unlocked(payment.m_unlock_time, payment.m_block_height);
       rpc_payment.subaddr_index = payment.m_subaddr_index;
-      rpc_payment.address      = m_wallet->get_subaddress_as_str(payment.m_subaddr_index);
+      rpc_payment.address       = m_wallet->get_subaddress_as_str(payment.m_subaddr_index);
       res.payments.push_back(rpc_payment);
     }
 
@@ -1748,15 +2358,31 @@ namespace tools
 
       for (auto & payment : payment_list)
       {
+	// Iterate over our vector to see which currencies are requested
+	bool bMatched = false;
+	std::vector<std::string> types = req.types;
+	if (!types.size())
+	  types.push_back("xhv");
+
+	for (auto type: types) {
+	  if (boost::algorithm::to_lower_copy(type) == boost::algorithm::to_lower_copy(payment.second.m_asset_type)) {
+	    bMatched = true;
+	  } else if (boost::algorithm::to_lower_copy(type) == "all") {
+	    bMatched = true;
+	  }
+	}
+	if (!bMatched)
+	  continue;
         wallet_rpc::payment_details rpc_payment;
-        rpc_payment.payment_id   = epee::string_tools::pod_to_hex(payment.first);
-        rpc_payment.tx_hash      = epee::string_tools::pod_to_hex(payment.second.m_tx_hash);
-        rpc_payment.amount       = payment.second.m_amount;
-        rpc_payment.block_height = payment.second.m_block_height;
-        rpc_payment.unlock_time  = payment.second.m_unlock_time;
+        rpc_payment.payment_id    = epee::string_tools::pod_to_hex(payment.first);
+        rpc_payment.tx_hash       = epee::string_tools::pod_to_hex(payment.second.m_tx_hash);
+        rpc_payment.amount        = payment.second.m_amount;
+        rpc_payment.type          = payment.second.m_asset_type;
+        rpc_payment.block_height  = payment.second.m_block_height;
+        rpc_payment.unlock_time   = payment.second.m_unlock_time;
         rpc_payment.subaddr_index = payment.second.m_subaddr_index;
-        rpc_payment.address      = m_wallet->get_subaddress_as_str(payment.second.m_subaddr_index);
-        rpc_payment.locked       = !m_wallet->is_transfer_unlocked(payment.second.m_unlock_time, payment.second.m_block_height);
+        rpc_payment.address       = m_wallet->get_subaddress_as_str(payment.second.m_subaddr_index);
+        rpc_payment.locked        = !m_wallet->is_transfer_unlocked(payment.second.m_unlock_time, payment.second.m_block_height);
         res.payments.push_back(std::move(rpc_payment));
       }
 
@@ -1804,14 +2430,15 @@ namespace tools
       for (auto & payment : payment_list)
       {
         wallet_rpc::payment_details rpc_payment;
-        rpc_payment.payment_id   = payment_id_str;
-        rpc_payment.tx_hash      = epee::string_tools::pod_to_hex(payment.m_tx_hash);
-        rpc_payment.amount       = payment.m_amount;
-        rpc_payment.block_height = payment.m_block_height;
-        rpc_payment.unlock_time  = payment.m_unlock_time;
+        rpc_payment.payment_id    = payment_id_str;
+        rpc_payment.tx_hash       = epee::string_tools::pod_to_hex(payment.m_tx_hash);
+        rpc_payment.amount        = payment.m_amount;
+        rpc_payment.type          = payment.m_asset_type;
+        rpc_payment.block_height  = payment.m_block_height;
+        rpc_payment.unlock_time   = payment.m_unlock_time;
         rpc_payment.subaddr_index = payment.m_subaddr_index;
-        rpc_payment.address      = m_wallet->get_subaddress_as_str(payment.m_subaddr_index);
-        rpc_payment.locked       = !m_wallet->is_transfer_unlocked(payment.m_unlock_time, payment.m_block_height);
+        rpc_payment.address       = m_wallet->get_subaddress_as_str(payment.m_subaddr_index);
+        rpc_payment.locked        = !m_wallet->is_transfer_unlocked(payment.m_unlock_time, payment.m_block_height);
         res.payments.push_back(std::move(rpc_payment));
       }
     }
@@ -1843,8 +2470,13 @@ namespace tools
     }
 
     wallet2::transfer_container transfers;
+    wallet2::transfer_container offshore_transfers;
+    std::map<std::string, wallet2::transfer_container> xasset_transfers;
     m_wallet->get_transfers(transfers);
+    m_wallet->get_offshore_transfers(offshore_transfers);
+    m_wallet->get_xasset_transfers(xasset_transfers);
 
+    // add XHV transfers
     for (const auto& td : transfers)
     {
       if (!filter || available != td.m_spent)
@@ -1853,6 +2485,7 @@ namespace tools
           continue;
         wallet_rpc::transfer_details rpc_transfers;
         rpc_transfers.amount       = td.amount();
+        rpc_transfers.asset_type   = "XHV";
         rpc_transfers.spent        = td.m_spent;
         rpc_transfers.global_index = td.m_global_output_index;
         rpc_transfers.tx_hash      = epee::string_tools::pod_to_hex(td.m_txid);
@@ -1862,6 +2495,52 @@ namespace tools
         rpc_transfers.frozen       = td.m_frozen;
         rpc_transfers.unlocked     = m_wallet->is_transfer_unlocked(td);
         res.transfers.push_back(rpc_transfers);
+      }
+    }
+
+    // add xUSD transfers
+    for (const auto& td : offshore_transfers)
+    {
+      if (!filter || available != td.m_spent)
+      {
+        if (req.account_index != td.m_subaddr_index.major || (!req.subaddr_indices.empty() && req.subaddr_indices.count(td.m_subaddr_index.minor) == 0))
+          continue;
+        wallet_rpc::transfer_details rpc_transfers;
+        rpc_transfers.amount       = td.amount();
+        rpc_transfers.asset_type   = "XUSD";
+        rpc_transfers.spent        = td.m_spent;
+        rpc_transfers.global_index = td.m_global_output_index;
+        rpc_transfers.tx_hash      = epee::string_tools::pod_to_hex(td.m_txid);
+        rpc_transfers.subaddr_index = {td.m_subaddr_index.major, td.m_subaddr_index.minor};
+        rpc_transfers.key_image    = td.m_key_image_known ? epee::string_tools::pod_to_hex(td.m_key_image) : "";
+        rpc_transfers.block_height = td.m_block_height;
+        rpc_transfers.frozen       = td.m_frozen;
+        rpc_transfers.unlocked     = m_wallet->is_transfer_unlocked(td);
+        res.transfers.push_back(rpc_transfers);
+      }
+    }
+
+    // add xAsset transfers
+    for (const auto& xasset : xasset_transfers)
+    {
+      for (const auto& td: xasset.second) {
+        if (!filter || available != td.m_spent)
+        {
+          if (req.account_index != td.m_subaddr_index.major || (!req.subaddr_indices.empty() && req.subaddr_indices.count(td.m_subaddr_index.minor) == 0))
+            continue;
+          wallet_rpc::transfer_details rpc_transfers;
+          rpc_transfers.amount       = td.amount();
+          rpc_transfers.asset_type   = xasset.first;
+          rpc_transfers.spent        = td.m_spent;
+          rpc_transfers.global_index = td.m_global_output_index;
+          rpc_transfers.tx_hash      = epee::string_tools::pod_to_hex(td.m_txid);
+          rpc_transfers.subaddr_index = {td.m_subaddr_index.major, td.m_subaddr_index.minor};
+          rpc_transfers.key_image    = td.m_key_image_known ? epee::string_tools::pod_to_hex(td.m_key_image) : "";
+          rpc_transfers.block_height = td.m_block_height;
+          rpc_transfers.frozen       = td.m_frozen;
+          rpc_transfers.unlocked     = m_wallet->is_transfer_unlocked(td);
+          res.transfers.push_back(rpc_transfers);
+        }
       }
     }
 
@@ -2224,7 +2903,12 @@ namespace tools
 
     try
     {
-      m_wallet->check_tx_key(txid, tx_key, additional_tx_keys, info.address, res.received, res.in_pool, res.confirmations);
+      std::map<std::string, uint64_t> received; 
+      m_wallet->check_tx_key(txid, tx_key, additional_tx_keys, info.address, received, res.in_pool, res.confirmations);
+      for (const auto& r: received) {
+        res.received_assets.push_back(r.first);
+        res.received_amounts.push_back(r.second);
+      }
     }
     catch (const std::exception &e)
     {
@@ -2290,7 +2974,12 @@ namespace tools
 
     try
     {
-      res.good = m_wallet->check_tx_proof(txid, info.address, info.is_subaddress, req.message, req.signature, res.received, res.in_pool, res.confirmations);
+      std::map<std::string, uint64_t> received; 
+      res.good = m_wallet->check_tx_proof(txid, info.address, info.is_subaddress, req.message, req.signature, received, res.in_pool, res.confirmations);
+      for (const auto& r: received) {
+        res.received_assets.push_back(r.first);
+        res.received_amounts.push_back(r.second);
+      }
     }
     catch (const std::exception &e)
     {
@@ -3462,6 +4151,9 @@ namespace tools
       }
     }
 
+    // NEAC - added to set language in newly-recreated wallet file
+    wal->set_seed_language(req.language);
+      
     try
     {
       if (!req.spendkey.empty())
@@ -3526,6 +4218,12 @@ namespace tools
     }
 
     // early check for mandatory fields
+    if (req.filename.empty())
+    {
+      er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;
+      er.message = "field 'filename' is mandatory. Please provide a filename to save the restored wallet to.";
+      return false;
+    }
     if (req.seed.empty())
     {
       er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;

@@ -54,6 +54,7 @@ using namespace epee;
 #include "common/notify.h"
 #include "hardforks/hardforks.h"
 #include "version.h"
+#include "offshore/asset_types.h"
 
 #undef MONERO_DEFAULT_LOG_CATEGORY
 #define MONERO_DEFAULT_LOG_CATEGORY "cn"
@@ -166,8 +167,8 @@ namespace cryptonote
   };
   static const command_line::arg_descriptor<std::string> arg_check_updates = {
     "check-updates"
-  , "Check for new versions of monero: [disabled|notify|download|update]"
-  , "notify"
+  , "Check for new versions of haven: [disabled|notify|download|update]"
+  , "disabled"
   };
   static const command_line::arg_descriptor<bool> arg_fluffy_blocks  = {
     "fluffy-blocks"
@@ -486,8 +487,8 @@ namespace cryptonote
       if (boost::filesystem::exists(old_files / "blockchain.bin"))
       {
         MWARNING("Found old-style blockchain.bin in " << old_files.string());
-        MWARNING("Monero now uses a new format. You can either remove blockchain.bin to start syncing");
-        MWARNING("the blockchain anew, or use monero-blockchain-export and monero-blockchain-import to");
+        MWARNING("Haven now uses a new format. You can either remove blockchain.bin to start syncing");
+        MWARNING("the blockchain anew, or use haven-blockchain-export and haven-blockchain-import to");
         MWARNING("convert your existing blockchain.bin to the new format. See README.md for instructions.");
         return false;
       }
@@ -502,7 +503,14 @@ namespace cryptonote
       return false;
     }
 
+    if (m_nettype == STAGENET) {
+      folder /= std::to_string(STAGENET_VERSION);
+    } else if (m_nettype == TESTNET) {
+      folder /= std::to_string(TESTNET_VERSION);
+    }
+    
     folder /= db->get_db_name();
+
     MGINFO("Loading blockchain from folder " << folder.string() << " ...");
 
     const std::string filename = folder.string();
@@ -806,7 +814,7 @@ namespace cryptonote
     bad_semantics_txes_lock.unlock();
 
     uint8_t version = m_blockchain_storage.get_current_hard_fork_version();
-    const size_t max_tx_version = version == 1 ? 1 : 2;
+    const size_t max_tx_version = (version < HF_VERSION_OFFSHORE_FULL) ? 2 : CURRENT_TRANSACTION_VERSION;
     if (tx.version == 0 || tx.version > max_tx_version)
     {
       // v2 is the latest one we know
@@ -865,6 +873,85 @@ namespace cryptonote
     std::vector<const rct::rctSig*> rvv;
     for (size_t n = 0; n < tx_info.size(); ++n)
     {
+      // Set the offshore TX type flags
+      bool offshore = false;
+      bool onshore = false;
+      bool offshore_transfer = false;
+      bool xasset_transfer = false;
+      bool xasset_to_xusd = false;
+      bool xusd_to_xasset = false;
+      std::string source;
+      std::string dest;
+      offshore::pricing_record pr;
+      
+      // Get the pricing_record_height for any offshore TX
+      uint64_t pricing_record_height = tx_info[n].tx->pricing_record_height;
+    
+      // Get the TX asset types
+      if (!get_tx_asset_types(*tx_info[n].tx, source, dest)) {
+        MERROR("At least 1 input or 1 output of the tx was invalid." << tx_info[n].tx_hash);
+        tx_info[n].tvc.m_verifivation_failed = true;
+        if (source.empty()) {
+          tx_info[n].tvc.m_invalid_input = true;
+        }
+        if (dest.empty()) {
+          tx_info[n].tvc.m_invalid_output = true;
+        }
+        continue;
+      }
+
+      // Get the TX type flags
+      if (!get_tx_type(source, dest, offshore, onshore, offshore_transfer, xusd_to_xasset, xasset_to_xusd, xasset_transfer)) {
+        MERROR("At least 1 input or 1 output of the tx was invalid." << tx_info[n].tx_hash);
+        tx_info[n].tvc.m_verifivation_failed = true;
+	continue;
+      }
+      
+      if (offshore || onshore || xusd_to_xasset || xasset_to_xusd) {
+        
+        // NEAC: recover from the reorg during Oracle switch - 1 TX affected
+        if (pricing_record_height == 821428) {
+          const std::string pr_821428 = "9b3f6f2f8f0000003d620e1202000000be71be2555120000b8627010000000000000000000000000ea0885b2270d00000000000000000000f797ff9be00b0000ddbdb005270a0000fc90cfe02b01060000000000000000000000000000000000d0a28224000e000000d643be960e0000002e8bb6a40e000000f8a817f80d00002f5d27d45cdbfbac3d0f6577103f68de30895967d7562fbd56c161ae90130f54301b1ea9d5fd062f37dac75c3d47178bc6f149d21da1ff0e8430065cb762b93a";
+          pr.xAG = 614976143259;
+          pr.xAU = 8892867133;
+          pr.xAUD = 20156914758078;
+          pr.xBTC = 275800760;
+          pr.xCAD = 0;
+          pr.xCHF = 14464149948650;
+          pr.xCNY = 0;
+          pr.xEUR = 13059317798903;
+          pr.xGBP = 11162715471325;
+          pr.xJPY = 1690137827184892;
+          pr.xNOK = 0;
+          pr.xNZD = 0;
+          pr.xUSD = 15393775330000;
+          pr.unused1 = 16040600000000;
+          pr.unused2 = 16100600000000;
+          pr.unused3 = 15359200000000;
+          std::string sig = "2f5d27d45cdbfbac3d0f6577103f68de30895967d7562fbd56c161ae90130f54301b1ea9d5fd062f37dac75c3d47178bc6f149d21da1ff0e8430065cb762b93a";
+          int j=0;
+          for (unsigned int i = 0; i < sig.size(); i += 2) {
+            std::string byteString = sig.substr(i, 2);
+            pr.signature[j++] = (char) strtol(byteString.c_str(), NULL, 16);
+          }
+          
+          if (!pr.verifySignature()) {
+            MERROR_VER("Failed to set correct PR for block: " << pricing_record_height);
+            return false;
+          }
+        } else {
+          // Get the correct pricing record here, given the height
+          std::vector<std::pair<cryptonote::blobdata,block>> blocks_pr;
+          bool b = m_blockchain_storage.get_blocks(pricing_record_height, 1, blocks_pr);
+          if (!b) {
+            MERROR_VER("Failed to obtain pricing record for block: " << pricing_record_height);
+            return false;
+          }
+          pr = blocks_pr[0].second.pricing_record;
+        }
+      }
+      
+
       if (!check_tx_semantic(*tx_info[n].tx, keeped_by_block))
       {
         set_semantics_failed(tx_info[n].tx_hash);
@@ -885,7 +972,7 @@ namespace cryptonote
           tx_info[n].result = false;
           break;
         case rct::RCTTypeSimple:
-          if (!rct::verRctSemanticsSimple(rv))
+          if (!rct::verRctSemanticsSimple(rv, pr, offshore, onshore, offshore_transfer, xasset_to_xusd, xusd_to_xasset, xasset_transfer, source, dest))
           {
             MERROR_VER("rct signature semantics check failed");
             set_semantics_failed(tx_info[n].tx_hash);
@@ -906,6 +993,8 @@ namespace cryptonote
           break;
         case rct::RCTTypeBulletproof:
         case rct::RCTTypeBulletproof2:
+        case rct::RCTTypeCLSAG:
+        case rct::RCTTypeCLSAGN:
           if (!is_canonical_bulletproof_layout(rv.p.bulletproofs))
           {
             MERROR_VER("Bulletproof does not have canonical form");
@@ -924,18 +1013,96 @@ namespace cryptonote
           break;
       }
     }
-    if (!rvv.empty() && !rct::verRctSemanticsSimple(rvv))
+
+    if (!rvv.empty()/* && !rct::verRctSemanticsSimple(rvv, pr, offshore, onshore, offshore_to_offshore)*/)
     {
-      LOG_PRINT_L1("One transaction among this group has bad semantics, verifying one at a time");
+      LOG_PRINT_L1("Verifying one transaction at a time");
       ret = false;
-      const bool assumed_bad = rvv.size() == 1; // if there's only one tx, it must be the bad one
       for (size_t n = 0; n < tx_info.size(); ++n)
       {
+	// Set the offshore TX type flags
+	bool offshore = false;
+	bool onshore = false;
+	bool offshore_transfer = false;
+	bool xasset_transfer = false;
+	bool xasset_to_xusd = false;
+	bool xusd_to_xasset = false;
+	std::string source;
+	std::string dest;
+	offshore::pricing_record pr;
+      
+        // Get the pricing_record_height for any offshore TX
+        uint64_t pricing_record_height = tx_info[n].tx->pricing_record_height;
+
+        // get the tx asset types
+        if (!get_tx_asset_types(*tx_info[n].tx, source, dest)) {
+          MERROR("At least 1 input or 1 output of the tx was invalid." << tx_info[n].tx_hash);
+          tx_info[n].tvc.m_verifivation_failed = true;
+          if (source.empty()) {
+          tx_info[n].tvc.m_invalid_input = true;
+          }
+          if (dest.empty()) {
+            tx_info[n].tvc.m_invalid_output = true;
+          }
+          continue;
+        }
+
+	// Get the TX type flags
+	if (!get_tx_type(source, dest, offshore, onshore, offshore_transfer, xusd_to_xasset, xasset_to_xusd, xasset_transfer)) {
+	  MERROR("At least 1 input or 1 output of the tx was invalid." << tx_info[n].tx_hash);
+	  tx_info[n].tvc.m_verifivation_failed = true;
+	  continue;
+	}
+      
+	if (offshore || onshore || xusd_to_xasset || xasset_to_xusd) {
+
+          // NEAC: recover from the reorg during Oracle switch - 1 TX affected
+          if (pricing_record_height == 821428) {
+            const std::string pr_821428 = "9b3f6f2f8f0000003d620e1202000000be71be2555120000b8627010000000000000000000000000ea0885b2270d00000000000000000000f797ff9be00b0000ddbdb005270a0000fc90cfe02b01060000000000000000000000000000000000d0a28224000e000000d643be960e0000002e8bb6a40e000000f8a817f80d00002f5d27d45cdbfbac3d0f6577103f68de30895967d7562fbd56c161ae90130f54301b1ea9d5fd062f37dac75c3d47178bc6f149d21da1ff0e8430065cb762b93a";
+            pr.xAG = 614976143259;
+            pr.xAU = 8892867133;
+            pr.xAUD = 20156914758078;
+            pr.xBTC = 275800760;
+            pr.xCAD = 0;
+            pr.xCHF = 14464149948650;
+            pr.xCNY = 0;
+            pr.xEUR = 13059317798903;
+            pr.xGBP = 11162715471325;
+            pr.xJPY = 1690137827184892;
+            pr.xNOK = 0;
+            pr.xNZD = 0;
+            pr.xUSD = 15393775330000;
+            pr.unused1 = 16040600000000;
+            pr.unused2 = 16100600000000;
+            pr.unused3 = 15359200000000;
+            std::string sig = "2f5d27d45cdbfbac3d0f6577103f68de30895967d7562fbd56c161ae90130f54301b1ea9d5fd062f37dac75c3d47178bc6f149d21da1ff0e8430065cb762b93a";
+            int j=0;
+            for (unsigned int i = 0; i < sig.size(); i += 2) {
+              std::string byteString = sig.substr(i, 2);
+              pr.signature[j++] = (char) strtol(byteString.c_str(), NULL, 16);
+            }
+            
+            if (!pr.verifySignature()) {
+              MERROR_VER("Failed to set correct PR for block: " << pricing_record_height);
+              return false;
+            }
+          } else {
+            // Get the correct pricing record here, given the height
+            std::vector<std::pair<cryptonote::blobdata,block>> blocks_pr;
+            bool b = m_blockchain_storage.get_blocks(pricing_record_height, 1, blocks_pr);
+            if (!b) {
+              MERROR_VER("Failed to obtain pricing record for block: " << pricing_record_height);
+              return false;
+            }
+            pr = blocks_pr[0].second.pricing_record;
+          }
+        }
+
         if (!tx_info[n].result)
           continue;
-        if (tx_info[n].tx->rct_signatures.type != rct::RCTTypeBulletproof && tx_info[n].tx->rct_signatures.type != rct::RCTTypeBulletproof2)
+        if (tx_info[n].tx->rct_signatures.type != rct::RCTTypeBulletproof && tx_info[n].tx->rct_signatures.type != rct::RCTTypeBulletproof2 && tx_info[n].tx->rct_signatures.type != rct::RCTTypeCLSAG && tx_info[n].tx->rct_signatures.type != rct::RCTTypeCLSAGN)
           continue;
-        if (assumed_bad || !rct::verRctSemanticsSimple(tx_info[n].tx->rct_signatures))
+        if (!rct::verRctSemanticsSimple(tx_info[n].tx->rct_signatures, pr, offshore, onshore, offshore_transfer, xasset_to_xusd, xusd_to_xasset, xasset_transfer, source, dest))
         {
           set_semantics_failed(tx_info[n].tx_hash);
           tx_info[n].tvc.m_verifivation_failed = true;
@@ -943,7 +1110,6 @@ namespace cryptonote
         }
       }
     }
-
     return ret;
   }
   //-----------------------------------------------------------------------------------------------
@@ -1095,7 +1261,7 @@ namespace cryptonote
     {
       uint64_t amount_in = 0;
       get_inputs_money_amount(tx, amount_in);
-      uint64_t amount_out = get_outs_money_amount(tx);
+      uint64_t amount_out = get_outs_money_amount(tx)["XHV"];
 
       if(amount_in <= amount_out)
       {
@@ -1176,7 +1342,7 @@ namespace cryptonote
         [this, &emission_amount, &total_fee_amount](uint64_t, const crypto::hash& hash, const block& b){
       std::vector<transaction> txs;
       std::vector<crypto::hash> missed_txs;
-      uint64_t coinbase_amount = get_outs_money_amount(b.miner_tx);
+      uint64_t coinbase_amount = get_outs_money_amount(b.miner_tx)["XHV"];
       this->get_transactions(b.tx_hashes, txs, missed_txs);      
       uint64_t tx_fee_amount = 0;
       for(const auto& tx: txs)
@@ -1196,11 +1362,33 @@ namespace cryptonote
   bool core::check_tx_inputs_keyimages_diff(const transaction& tx) const
   {
     std::unordered_set<crypto::key_image> ki;
-    for(const auto& in: tx.vin)
-    {
-      CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
-      if(!ki.insert(tokey_in.k_image).second)
-        return false;
+    if (tx.vin[0].type() == typeid(txin_to_key)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
+	if(!ki.insert(tokey_in.k_image).second)
+	  return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_offshore)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_offshore, tokey_in, false);
+	if(!ki.insert(tokey_in.k_image).second)
+	  return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_onshore)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_onshore, tokey_in, false);
+	if(!ki.insert(tokey_in.k_image).second)
+	  return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_xasset)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_xasset, tokey_in, false);
+	if(!ki.insert(tokey_in.k_image).second)
+	  return false;
+      }
     }
     return true;
   }
@@ -1208,14 +1396,36 @@ namespace cryptonote
   bool core::check_tx_inputs_ring_members_diff(const transaction& tx) const
   {
     const uint8_t version = m_blockchain_storage.get_current_hard_fork_version();
-    if (version >= 6)
-    {
-      for(const auto& in: tx.vin)
-      {
-        CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
-        for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
-          if (tokey_in.key_offsets[n] == 0)
-            return false;
+    if (tx.vin[0].type() == typeid(txin_to_key)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
+	for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
+	  if (tokey_in.key_offsets[n] == 0)
+	    return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_offshore)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_offshore, tokey_in, false);
+	for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
+	  if (tokey_in.key_offsets[n] == 0)
+	    return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_onshore)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_onshore, tokey_in, false);
+	for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
+	  if (tokey_in.key_offsets[n] == 0)
+	    return false;
+      }
+    }
+    else if (tx.vin[0].type() == typeid(txin_xasset)) {
+      for(const auto& in: tx.vin) {
+	CHECKED_GET_SPECIFIC_VARIANT(in, const txin_xasset, tokey_in, false);
+	for (size_t n = 1; n < tokey_in.key_offsets.size(); ++n)
+	  if (tokey_in.key_offsets[n] == 0)
+	    return false;
       }
     }
     return true;
@@ -1224,11 +1434,37 @@ namespace cryptonote
   bool core::check_tx_inputs_keyimages_domain(const transaction& tx) const
   {
     std::unordered_set<crypto::key_image> ki;
-    for(const auto& in: tx.vin)
-    {
-      CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
-      if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
-        return false;
+    if (tx.vin[0].type() == typeid(txin_to_key)) {
+      for(const auto& in: tx.vin)
+	{
+	  CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, false);
+	  if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
+	    return false;
+	}
+    }
+    else if (tx.vin[0].type() == typeid(txin_offshore)) {
+      for(const auto& in: tx.vin)
+	{
+	  CHECKED_GET_SPECIFIC_VARIANT(in, const txin_offshore, tokey_in, false);
+	  if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
+	    return false;
+	}
+    }
+    else if (tx.vin[0].type() == typeid(txin_onshore)) {
+      for(const auto& in: tx.vin)
+	{
+	  CHECKED_GET_SPECIFIC_VARIANT(in, const txin_onshore, tokey_in, false);
+	  if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
+	    return false;
+	}
+    }
+    else if (tx.vin[0].type() == typeid(txin_xasset)) {
+      for(const auto& in: tx.vin)
+	{
+	  CHECKED_GET_SPECIFIC_VARIANT(in, const txin_xasset, tokey_in, false);
+	  if (!(rct::scalarmultKey(rct::ki2rct(tokey_in.k_image), rct::curveOrder()) == rct::identity()))
+	    return false;
+	}
     }
     return true;
   }
@@ -1640,7 +1876,7 @@ namespace cryptonote
     {
       std::string main_message;
       if (m_offline)
-        main_message = "The daemon is running offline and will not attempt to sync to the Monero network.";
+        main_message = "The daemon is running offline and will not attempt to sync to the Haven network.";
       else
         main_message = "The daemon will start synchronizing with the network. This may take a long time to complete.";
       MGINFO_YELLOW(ENDL << "**********************************************************************" << ENDL
@@ -1687,7 +1923,7 @@ namespace cryptonote
   //-----------------------------------------------------------------------------------------------
   bool core::check_updates()
   {
-    static const char software[] = "monero";
+    static const char software[] = "haven";
 #ifdef BUILD_TAG
     static const char buildtag[] = BOOST_PP_STRINGIZE(BUILD_TAG);
     static const char subdir[] = "cli"; // because it can never be simple
@@ -1872,7 +2108,7 @@ namespace cryptonote
     const time_t now = time(NULL);
     const std::vector<time_t> timestamps = m_blockchain_storage.get_last_block_timestamps(max_blocks_checked);
 
-    static const unsigned int seconds[] = { 5400, 3600, 1800, 1200, 600 };
+    static const unsigned int seconds[] = { 5400, 1800, 600 };
     for (size_t n = 0; n < sizeof(seconds)/sizeof(seconds[0]); ++n)
     {
       unsigned int b = 0;
@@ -1882,8 +2118,8 @@ namespace cryptonote
       MDEBUG("blocks in the last " << seconds[n] / 60 << " minutes: " << b << " (probability " << p << ")");
       if (p < threshold)
       {
-        MWARNING("There were " << b << (b == max_blocks_checked ? " or more" : "") << " blocks in the last " << seconds[n] / 60 << " minutes, there might be large hash rate changes, or we might be partitioned, cut off from the Monero network or under attack, or your computer's time is off. Or it could be just sheer bad luck.");
-
+        MWARNING("There were " << b << (b == max_blocks_checked ? " or more" : "") << " blocks in the last " << seconds[n] / 60 << " minutes, there might be large hash rate changes, or we might be partitioned, cut off from the Haven network or under attack, or your computer's time is off. Or it could be just sheer bad luck.");
+        
         std::shared_ptr<tools::Notify> block_rate_notify = m_block_rate_notify;
         if (block_rate_notify)
         {
